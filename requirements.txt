@@ -1,0 +1,10 @@
+fastapi
+uvicorn
+torch
+transformers
+pillow
+requests
+numpy
+pandas
+faiss-cpu
+rank-bm25
