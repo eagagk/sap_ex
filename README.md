@@ -14,46 +14,46 @@ This project implements the SAP CXII technical exercise: given a product's `uniq
 
 ### Indexing
 
-Run `gen_embv2.py` to generate the active artifacts configured in `config.py`. Products without usable image URLs or with failed embeddings are skipped. The image and text vectors for each indexed product use the same FAISS ID.
+Run `gen_embv2.py` to generate the active artifacts configured in `config.py`. Image and text embeddings are generated independently, and either may be unavailable for an individual product. Products with a valid ID and at least one successfully generated image vector, text vector, or numeric attribute are retained in metadata. Available image and text vectors use the same FAISS ID.
 
 ```mermaid
 flowchart TD
     A[Line-delimited product catalog] --> B[Read product row]
     B --> C{Usable image URLs?}
-    C -- No --> X[Skip product]
-    C -- Yes --> D[Download up to 5 image views]
-    D --> E[Generate, average-pool, and normalize image vector]
-    B --> F[Build product text]
-    F --> G[Generate and normalize text vector]
-    E --> H{Both vectors valid?}
-    G --> H
-    H -- No --> X
-    H -- Yes --> I[Assign shared FAISS ID]
-    I --> J[Image HNSW index]
-    I --> K[Text HNSW index]
-    I --> L[Product metadata]
-    J --> M[Write active artifacts]
-    K --> M
-    L --> M
+    C -- No --> D[No image vector]
+    C -- Yes --> E[Select up to 5 URLs from first size column with valid URLs]
+    E --> F[Download available image views]
+    F --> G[Generate, average-pool, and normalize image vector]
+    B --> H[Build product text]
+    H --> I[Generate and normalize text vector]
+    D --> J{Any image, text, or numeric data?}
+    G --> J
+    I --> J
+    J -- No --> X[Skip product]
+    J -- Yes --> K[Assign shared FAISS ID]
+    K --> L[Add available vectors to their indexes]
+    K --> M[Write product metadata]
+    L --> N[Write active artifacts]
+    M --> N
 ```
 
 ### Recommendation Query
 
-The requested product must exist in the source catalog. It does not have to be indexed, but it must have at least one downloadable image to generate the required image embedding.
+The requested product must exist in the source catalog, but it does not have to be indexed or have a downloadable image. Available image, text, and numeric attributes can be used; if no image, text, or numeric query features are available, the service returns no recommendations.
 
 ```mermaid
 flowchart TD
     A[Request with product ID] --> B[Look up source catalog row]
     B --> C{Product found?}
     C -- No --> X[Return 404]
-    C -- Yes --> D[Embed product images]
-    C --> E[Build and embed product text]
-    D --> F[Search image HNSW index]
-    E --> G[Search text HNSW index]
-    F --> H[Union candidate IDs]
-    G --> H
-    H --> I[Remove query product if indexed]
-    I --> J[Score image, text, price, weight, and rating]
+    C -- Yes --> D[Generate available image and text embeddings]
+    D --> E[Search image and text indexes]
+    E --> F{Any vector candidates?}
+    F -- Yes --> G[Union candidates from both indexes]
+    F -- No --> H[Use indexed metadata for numeric-only fallback]
+    G --> I[Remove query product if indexed]
+    H --> I
+    I --> J[Score available signals; unavailable signals contribute zero]
     J --> K[Sort and return requested results]
 ```
 
@@ -148,7 +148,7 @@ Returns source-catalog details for one product without running similarity search
 
 Returns service status and the number of indexed products.
 
-Unknown product IDs return `404`. Invalid query parameters are rejected by FastAPI. The similar-products endpoint returns `422` if query embeddings cannot be created and `500` for unexpected recommendation failures.
+Unknown product IDs return `404`. Invalid query parameters are rejected by FastAPI. The similar-products endpoint maps `ValueError` to `422` and unexpected exceptions to `500`. Image or text embedding failures are logged and that modality is omitted; if no query features remain, the service returns no recommendations.
 
 ## Configuration and Ranking
 
@@ -162,4 +162,12 @@ Update `config.py` to change the model, dataset or artifact paths, ranking weigh
 | Weight | `0.10` | Weight is normalized to grams; exponential proximity scale is `100`. |
 | Rating | `0.10` | Exponential proximity scale is `1`. |
 
-FAISS inner-product scores for normalized embeddings are mapped from `[-1, 1]` to `[0, 1]`. Numeric proximity is `exp(-abs(value_a - value_b) / scale)`. Missing numeric values receive `0.5`; a candidate not retrieved by one modality receives `0.0` for that modality. The default candidate depth is `150` per modality, and HNSW `efSearch` is `50`.
+FAISS inner-product scores for normalized embeddings are mapped from `[-1, 1]` to `[0, 1]`. Numeric proximity is `exp(-abs(value_a - value_b) / scale)`. Missing numeric values and candidates not retrieved by a modality contribute `0.0` for that signal; weights remain fixed and are not renormalized. Each modality returns up to 150 candidates. If neither vector search returns candidates, numeric-only fallback considers all indexed metadata records. HNSW `efSearch` is `50`.
+
+Image URLs are selected by column priority (`large`, then `medium`, then `image_urls__small`): the first column with valid URLs is used, up to `MAX_IMAGES_PER_PRODUCT`. Multiple successful images from that selected column are mean-pooled into one normalized product vector. Failed URLs within the selected column are skipped; if all of them fail, the pipeline does not then try URLs from the next size column.
+
+## Design Decisions and Future Improvements
+
+See [Design Decisions and Potential Improvements](./DESIGN_DECISIONS_AND_IMPROVEMENTS.md)
+for the current indexing and retrieval trade-offs, along with proposed
+architecture and accuracy improvements.

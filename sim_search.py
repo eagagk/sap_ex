@@ -83,19 +83,21 @@ class ProductSearchEngine:
             for faiss_id, metadata in self.metadata_by_id.items()
         }
 
-        # This implementation expects every indexed candidate
-        # to have both image and text vectors.
-        if self.image_index.ntotal != self.text_index.ntotal:
-            raise RuntimeError(
-                "Image and text index counts differ. "
-                "Rebuild both indexes together."
-            )
+        metadata_ids = set(self.metadata_by_id)
 
-        if self.image_index.ntotal != len(self.metadata_by_id):
-            raise RuntimeError(
-                "Index count and metadata count differ. "
-                "Rebuild all assets together."
-            )
+        for index_name, index in (
+            ("Image", self.image_index),
+            ("Text", self.text_index),
+        ):
+            index_ids = {
+                int(faiss_id)
+                for faiss_id in faiss.vector_to_array(index.id_map)
+            }
+
+            if not index_ids.issubset(metadata_ids):
+                raise RuntimeError(
+                    f"{index_name} index contains IDs missing from metadata."
+                )
 
         # Load the source catalog.
         dataframe = pd.read_json(
@@ -197,7 +199,7 @@ class ProductSearchEngine:
             if text:
                 parts.append(f"{label}: {text}")
 
-        return ". ".join(parts) or "Fashion product"
+        return ". ".join(parts) if parts else None
 
     def _get_product_image_urls(self, row):
         """Return image views, preferring large images."""
@@ -333,6 +335,51 @@ class ProductSearchEngine:
             np.clip((score + 1.0) / 2.0, 0.0, 1.0)
         )
 
+    def _search_index(self, index, query_embedding):
+        if query_embedding is None or index.ntotal == 0:
+            return {}
+
+        candidate_depth = min(
+            config.DEFAULT_CANDIDATE_POOL,
+            index.ntotal,
+        )
+
+        scores, ids = index.search(
+            query_embedding.reshape(1, -1).astype("float32"),
+            candidate_depth,
+        )
+
+        return {
+            int(faiss_id): self._normalize_inner_product(float(score))
+            for faiss_id, score in zip(ids[0], scores[0])
+            if faiss_id != -1
+        }
+
+    @staticmethod
+    def _numeric_similarities(query_values, candidate_meta):
+        similarities = {}
+
+        fields = {
+            "price": "price_diff",
+            "weight": "weight_diff",
+            "rating": "rating_diff",
+        }
+
+        for field, scale_name in fields.items():
+            query_value = query_values[field]
+            candidate_value = to_float(candidate_meta.get(field))
+
+            if query_value is None or candidate_value is None:
+                continue
+
+            similarities[field] = calculate_proximity(
+                query_value,
+                candidate_value,
+                config.SCALING_FACTORS[scale_name],
+            )
+
+        return similarities
+
     def recommend(self, sku, num_items=5):
         """
         Every request generates fresh FashionCLIP query embeddings.
@@ -345,91 +392,69 @@ class ProductSearchEngine:
         if query_row is None:
             return None
 
-        query_image_urls = self._get_product_image_urls(
-            query_row
-        )
-
+        query_image_urls = self._get_product_image_urls(query_row)
         query_text = self._build_product_text(query_row)
 
-        # Step 1: Generate fresh query embeddings.
-        query_image_embedding = self._generate_image_embedding(
-            query_image_urls
+        query_image_embedding = None
+        if query_image_urls:
+            try:
+                query_image_embedding = self._generate_image_embedding(
+                    query_image_urls
+                )
+            except Exception as error:
+                print(f"Query image embedding failed: {error}")
+
+        query_text_embedding = None
+        if query_text:
+            try:
+                query_text_embedding = self._generate_text_embedding(
+                    query_text
+                )
+            except Exception as error:
+                print(f"Query text embedding failed: {error}")
+
+        query_values = {
+            "price": to_float(query_row.get("sales_price")),
+            "weight": clean_weight(query_row.get("weight")),
+            "rating": to_float(query_row.get("rating")),
+        }
+
+        has_numeric_query_data = any(
+            value is not None
+            for value in query_values.values()
         )
 
-        query_text_embedding = self._generate_text_embedding(
-            query_text
-        )
+        if (
+            query_image_embedding is None
+            and query_text_embedding is None
+            and not has_numeric_query_data
+        ):
+            return []
 
-        if query_image_embedding is None:
-            raise ValueError(
-                f"Could not create an image embedding for '{sku}'."
-            )
-
-        if query_text_embedding is None:
-            raise ValueError(
-                f"Could not create a text embedding for '{sku}'."
-            )
-
-        query_image_vector = query_image_embedding.reshape(
-            1,
-            -1,
-        )
-
-        query_text_vector = query_text_embedding.reshape(
-            1,
-            -1,
-        )
-
-        candidate_depth = min(
-            config.DEFAULT_CANDIDATE_POOL,
-            self.image_index.ntotal,
-            self.text_index.ntotal,
-        )
-
-        # Step 2: Image and text FAISS searches run independently.
+        # Search whichever embedding modalities are available.
         with ThreadPoolExecutor(max_workers=2) as executor:
             image_future = executor.submit(
-                self.image_index.search,
-                query_image_vector,
-                candidate_depth,
+                self._search_index,
+                self.image_index,
+                query_image_embedding,
             )
-
             text_future = executor.submit(
-                self.text_index.search,
-                query_text_vector,
-                candidate_depth,
+                self._search_index,
+                self.text_index,
+                query_text_embedding,
             )
 
-            image_scores, image_ids = image_future.result()
-            text_scores, text_ids = text_future.result()
+            image_score_map = image_future.result()
+            text_score_map = text_future.result()
 
-        image_score_map = {
-            int(faiss_id): self._normalize_inner_product(
-                float(score)
-            )
-            for faiss_id, score in zip(
-                image_ids[0],
-                image_scores[0],
-            )
-            if faiss_id != -1
-        }
-
-        text_score_map = {
-            int(faiss_id): self._normalize_inner_product(
-                float(score)
-            )
-            for faiss_id, score in zip(
-                text_ids[0],
-                text_scores[0],
-            )
-            if faiss_id != -1
-        }
-
-        # Step 3: Union candidate IDs from both FAISS searches.
+        # Use numeric-only search if neither vector search returned candidates.
         candidate_ids = (
             set(image_score_map)
             .union(text_score_map)
         )
+
+        if not candidate_ids:
+            candidate_ids = set(self.metadata_by_id)
 
         # Remove source product if it already exists in the index.
         query_faiss_id = self.sku_to_faiss_id.get(sku)
@@ -437,21 +462,9 @@ class ProductSearchEngine:
         if query_faiss_id is not None:
             candidate_ids.discard(query_faiss_id)
 
-        query_price = to_float(
-            query_row.get("sales_price")
-        )
-
-        query_weight = clean_weight(
-            query_row.get("weight")
-        )
-
-        query_rating = to_float(
-            query_row.get("rating")
-        )
-
         results = []
 
-        # Step 4: Calculate hybrid score for every union candidate.
+        # Keep the configured weights fixed; unavailable features score zero.
         for candidate_id in candidate_ids:
             candidate_meta = self.metadata_by_id.get(
                 candidate_id
@@ -460,8 +473,6 @@ class ProductSearchEngine:
             if candidate_meta is None:
                 continue
 
-            # Candidate may be retrieved by only one modality.
-            # No FAISS reconstruction is performed.
             image_similarity = image_score_map.get(
                 candidate_id,
                 0.0,
@@ -471,24 +482,22 @@ class ProductSearchEngine:
                 candidate_id,
                 0.0,
             )
-
-            price_similarity = calculate_proximity(
-                candidate_meta.get("price"),
-                query_price,
-                config.SCALING_FACTORS["price_diff"],
+            numeric_similarities = self._numeric_similarities(
+                query_values,
+                candidate_meta,
             )
 
-            weight_similarity = calculate_proximity(
-                candidate_meta.get("weight"),
-                query_weight,
-                config.SCALING_FACTORS["weight_diff"],
+            has_vector_match = (
+                candidate_id in image_score_map
+                or candidate_id in text_score_map
             )
 
-            rating_similarity = calculate_proximity(
-                candidate_meta.get("rating"),
-                query_rating,
-                config.SCALING_FACTORS["rating_diff"],
-            )
+            if not has_vector_match and not numeric_similarities:
+                continue
+
+            price_similarity = numeric_similarities.get("price", 0.0)
+            weight_similarity = numeric_similarities.get("weight", 0.0)
+            rating_similarity = numeric_similarities.get("rating", 0.0)
 
             final_score = (
                 image_similarity * config.WEIGHTS["image"]
