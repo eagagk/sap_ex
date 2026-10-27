@@ -7,4 +7,3 @@ requests
 numpy
 pandas
 faiss-cpu
-rank-bm25
