@@ -46,6 +46,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY --from=builder /install /usr/local
 
 COPY app.py config.py sim_search.py utils.py /app/
+COPY static /app/static
 
 COPY image_hnsw_all.bin text_hnsw_all.bin /app/
 COPY product_metadata_all.json /app/

@@ -7,6 +7,7 @@ This project implements the SAP CXII technical exercise: given a product's `uniq
 - Multimodal retrieval from separate image and text FAISS HNSW indexes.
 - Hybrid ranking using visual, semantic, price, weight, and rating similarity.
 - API endpoints for product recommendations, product details, and health status.
+- A lightweight web UI for calling the recommendation and product endpoints.
 - Batch index generation with shared IDs across both indexes and product metadata.
 - Docker image runs the API as a non-root user.
 
@@ -62,6 +63,7 @@ flowchart TD
 | File or asset | Purpose |
 | --- | --- |
 | `app.py` | FastAPI app, startup loading, endpoints, parameter validation, and HTTP error handling. |
+| `static/index.html` | Browser UI for recommendations, similar IDs, product details, and API health. |
 | `config.py` | Dataset and artifact paths, model ID, ranking weights, similarity scales, and result limits. |
 | `sim_search.py` | Loads the catalog, model, indexes, and metadata; creates query embeddings; retrieves and ranks candidates. |
 | `gen_embv2.py` | Current multi-image batch embedding and FAISS indexing pipeline. |
@@ -96,7 +98,7 @@ From the project directory in PowerShell:
 py -3.10 -m venv .venv
 .venv\Scripts\Activate.ps1
 python -m pip install -r requirements.txt
-uvicorn app:app --host 0.0.0.0 --port 8000
+uvicorn app:app --reload
 ```
 
 Run `python gen_embv2.py` first if the configured index artifacts are missing or need to be rebuilt. The API loads the model and index assets during startup. Local Uvicorn listens on port `8000`.
@@ -123,6 +125,7 @@ The source catalog and active indexes are copied into the image; index generatio
 ## API Reference
 
 FastAPI's interactive documentation is available at `http://localhost:8000/docs` locally or `http://localhost:9000/docs` when using Docker.
+The web UI is served at `http://localhost:8000/` locally or `http://localhost:9000/` when using Docker.
 
 ### `GET /find_similar_products`
 

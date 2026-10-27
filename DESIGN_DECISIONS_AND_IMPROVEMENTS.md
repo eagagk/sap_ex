@@ -56,6 +56,10 @@ improvements.
   protect compute resources and keep latency predictable.
 - **Scale numeric fallback.** Use bounded numeric candidate generation and
   merge those candidates with vector results where appropriate.
+- **Evaluate a persistent vector database.** Consider Qdrant or another
+  on-disk vector store instead of loading the FAISS indexes fully into memory.
+  Compare persistence, memory usage, operational complexity, and search
+  performance before migrating.
 - **Validate artifacts and reliability.** Check index/metadata compatibility
   at startup and test missing data, failed downloads, and concurrent load.
 

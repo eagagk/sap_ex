@@ -1,6 +1,8 @@
 from contextlib import asynccontextmanager
+import os
 from typing import List
 from fastapi import FastAPI, HTTPException, Query
+from fastapi.staticfiles import StaticFiles
 
 import config
 from sim_search import ProductSearchEngine
@@ -151,3 +153,13 @@ def get_product_details(product_id: str):
         "color": colour,
         "weight_g": clean_weight(product.get("weight")),
     }
+
+
+app.mount(
+    "/",
+    StaticFiles(
+        directory=os.path.join(config.BASE_DIR, "static"),
+        html=True,
+    ),
+    name="ui",
+)

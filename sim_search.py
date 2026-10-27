@@ -511,6 +511,7 @@ class ProductSearchEngine:
 
             results.append({
                 "product_id": candidate_meta["sku"],
+                "name": candidate_meta.get("name", ""),
                 "final_match_score": round(
                     float(final_score),
                     6,
